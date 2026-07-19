@@ -599,7 +599,8 @@ const BS = {
   /* --- cote Supabase : branche bloc par bloc (phase 4) --- */
   _sb: {
     client: null,
-    entreprise: null,          // la fiche de l'artisan, une fois chargee
+    entreprise: null,          // la vitrine de l'artisan
+    entrepriseId: null,        // son identifiant, connu une fois connecte
 
     /* Ouvre la connexion a Supabase. Appele une seule fois au demarrage. */
     demarrer(){
@@ -666,6 +667,83 @@ const BS = {
       return f;
     },
 
+    /* --- CHANTIERS -------------------------------------------------
+       Les champs principaux vont dans leurs colonnes.
+       Tout le reste (photos, pointages, devis...) patiente dans « reste »
+       jusqu'a ce qu'on le branche a sa vraie table. --------------- */
+    COLONNES_CH: {
+      nom:'nom', etape:'etape', description:'description', adresse:'adresse',
+      ville:'ville', cp:'code_postal',
+      dateDebut:'date_debut', dateFin:'date_fin', heuresPrevues:'heures_prevues',
+      dateRdv:'date_rdv', heureRdv:'heure_rdv', noteRdv:'note_rdv',
+      rdvStatus:'rdv_statut', rdvContre:'rdv_contre',
+      clientCode:'code_client', clientType:'client_type', client:'client_nom',
+      clientPrenom:'client_prenom', clientSociete:'client_societe',
+      clientEmail:'client_email', clientTel:'client_tel',
+      clientSiren:'client_siren', clientTvaIntra:'client_tva',
+      published:'publie', archived:'archive', rgpdAnonymise:'rgpd_anonymise'
+    },
+    DATES_CH: ['date_debut','date_fin','date_rdv'],
+
+    versChantier(r){
+      if(!r) return null;
+      const c = Object.assign({}, r.reste || {});
+      const M = BS._sb.COLONNES_CH;
+      const NON_TEXTE = ['rdv_contre','publie','archive','rgpd_anonymise','heures_prevues'];
+      Object.keys(M).forEach(function(k){
+        const col = M[k], v = r[col];
+        if(v !== null && v !== undefined) c[k] = v;
+        else if(NON_TEXTE.indexOf(col) < 0) c[k] = '';   // vide en base = vide dans l'app
+      });
+      c.heuresPrevues = Number(r.heures_prevues) || 0;
+      c.published = !!r.publie;
+      c.archived  = !!r.archive;
+      c.createdAt = r.cree_le ? new Date(r.cree_le).getTime() : Date.now();
+      return c;
+    },
+
+    versLigne(c){
+      const M = BS._sb.COLONNES_CH, D = BS._sb.DATES_CH;
+      const ligne = { entreprise_id: BS._sb.entrepriseId };
+      const reste = {};
+      Object.keys(c || {}).forEach(function(k){
+        if(k === 'createdAt' || k === 'id') return;
+        if(M[k] !== undefined){
+          let v = c[k];
+          if(v === '' && D.indexOf(M[k]) >= 0) v = null;   // une date vide = pas de date
+          if(v === '' && M[k] === 'heures_prevues') v = null;
+          ligne[M[k]] = v;
+        } else {
+          reste[k] = c[k];
+        }
+      });
+      ligne.publie = !!c.published;
+      ligne.archive = !!c.archived;
+      if(ligne.client_type === '') ligne.client_type = null;
+      ligne.reste = reste;
+      return ligne;
+    },
+
+    lireChantiers(){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      return c.from('chantiers').select('*').then(function(r){
+        if(r.error){ console.warn('Chantiers :', r.error.message); return null; }
+        const out = {};
+        (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versChantier(x); });
+        return out;
+      });
+    },
+
+    ecrireChantier(id, valeur){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+      if(!valeur) return c.from('chantiers').delete().eq('id', id);
+      if(!BS._sb.entrepriseId){ console.warn('Chantier : entreprise inconnue'); return Promise.resolve(); }
+      const ligne = BS._sb.versLigne(valeur); ligne.id = id;
+      return c.from('chantiers').upsert(ligne, { onConflict:'id' }).then(function(r){
+        if(r.error) console.warn('Enregistrement chantier :', r.error.message);
+      });
+    },
+
     /* Toute l'equipe. Les regles de la base ne renvoient que
        les collegues de la meme entreprise — jamais ceux d'un autre client. */
     lireEquipe(){
@@ -673,7 +751,11 @@ const BS = {
       return c.from('utilisateurs').select('*').then(function(r){
         if(r.error){ console.warn('Equipe :', r.error.message); return null; }
         const out = {};
-        (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versMembre(x); });
+        const moi = AUTH.qui();
+        (r.data||[]).forEach(function(x){
+          out[x.id] = BS._sb.versMembre(x);
+          if(moi && x.id === moi.uid) BS._sb.entrepriseId = x.entreprise_id;
+        });
         return out;
       });
     },
@@ -689,6 +771,7 @@ const BS = {
       if(chemin === 'config'){ BS._sb.lireReglages().then(function(v){ cb(v); }); return null; }
       if(chemin === 'team'){ BS._sb.lireEquipe().then(function(v){ cb(v); }); return null; }
       if(chemin.indexOf('team/')===0){ BS._sb.lireMembre(chemin.slice(5)).then(function(v){ cb(v); }); return null; }
+      if(chemin === 'chantiers'){ BS._sb.lireChantiers().then(function(v){ cb(v); }); return null; }
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       cb(null); return null;
     },
@@ -696,6 +779,7 @@ const BS = {
       if(chemin === 'config') return BS._sb.lireReglages();
       if(chemin === 'team') return BS._sb.lireEquipe();
       if(chemin.indexOf('team/')===0) return BS._sb.lireMembre(chemin.slice(5));
+      if(chemin === 'chantiers') return BS._sb.lireChantiers();
       if(chemin.indexOf('invites/')===0) return Promise.resolve(null);  // gere par rejoindre_entreprise
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       return Promise.resolve(null);
@@ -715,6 +799,15 @@ const BS = {
                   if(r.error) console.warn('Enregistrement reglages :', r.error.message);
                 });
       }
+      /* chantiers/<id> : une fiche de chantier */
+      let mc = chemin.match(/^chantiers\/([^/]+)$/);
+      if(mc) return BS._sb.ecrireChantier(mc[1], valeur);
+      if(chemin === 'chantiers'){
+        /* remplacement en bloc (import de sauvegarde, demo) */
+        const liste = Object.keys(valeur||{});
+        return Promise.all(liste.map(function(k){ return BS._sb.ecrireChantier(k, valeur[k]); }));
+      }
+
       /* team/<uid>/seen/<type> : une case de notifications vues */
       let m = chemin.match(/^team\/([^/]+)\/seen\/([^/]+)$/);
       if(m){
@@ -736,6 +829,15 @@ const BS = {
       return Promise.resolve();
     },
     supprimer(chemin){
+      const mc = chemin.match(/^chantiers\/([^/]+)$/);
+      if(mc){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return c.from('chantiers').delete().eq('id', mc[1]);
+      }
+      if(chemin === 'chantiers'){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return c.from('chantiers').delete().eq('entreprise_id', BS._sb.entrepriseId);
+      }
       const m = chemin.match(/^team\/([^/]+)$/);
       if(m){
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
@@ -881,7 +983,18 @@ function refNoteFrais(uid2,id){ return db().ref('batisuivi/notesfrais/'+uid2+'/'
 
 // ---- utils ----
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-function uid(){ return Math.random().toString(36).slice(2,9); }
+function uid(){
+  /* Supabase attend des identifiants au format standard (UUID).
+     En mode Firebase, on garde les identifiants courts d'origine. */
+  if(BACKEND==='supabase'){
+    try{ if(crypto && crypto.randomUUID) return crypto.randomUUID(); }catch(_){ }
+    return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c){
+      const r = Math.random()*16|0, v = (c==='x') ? r : ((r&0x3)|0x8);
+      return v.toString(16);
+    });
+  }
+  return Math.random().toString(36).slice(2,9);
+}
 function code6(){ const c="ABCDEFGHJKLMNPQRSTUVWXYZ23456789"; let s=""; for(let i=0;i<6;i++)s+=c[Math.floor(Math.random()*c.length)]; return s; }
 function todayISO(){ return new Date().toISOString().slice(0,10); }
 function frDate(iso){ if(!iso) return '—'; const d=new Date(iso); return d.toLocaleDateString('fr-FR',{day:'2-digit',month:'short',year:'numeric'}); }
@@ -1251,6 +1364,10 @@ function rechargerEquipe(){
         if(BOOTED) render();
       });
       if(SCREEN==='entry'){ SCREEN='team'; TAB='chantiers'; CUR_CHANTIER=null; }
+      BS.ecouter('chantiers', function(v){
+        CHANTIERS = v || {}; lsSet('cache_chantiers', CHANTIERS);
+        if(BOOTED) render();
+      });
     }
     if(BOOTED) render();
   });
@@ -1381,7 +1498,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v217 · 19/07";
+const APP_VERSION="v218 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
