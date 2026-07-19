@@ -1334,7 +1334,7 @@ function render(){
   if(SCREEN==='client'){ navEl.classList.add('hidden'); return renderClient(); }
   if(SCREEN==='team'){
     if(useFB && !AUTH_USER){ navEl.classList.add('hidden'); return renderTeamAuth(); }
-    if(useFB && AUTH_USER && !ME){ navEl.classList.add('hidden'); return renderJoinTeam(); }
+    if((useFB||BACKEND==='supabase') && AUTH_USER && !ME){ navEl.classList.add('hidden'); return renderJoinTeam(); }
     if(!ME){ navEl.classList.add('hidden'); return renderTeamAuth(); } // mode local : pas encore connecté
     if(isBoss() && !EMP_PREVIEW){
       initSwipeBack();
@@ -1381,7 +1381,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v216 · 19/07";
+const APP_VERSION="v217 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
@@ -2257,7 +2257,7 @@ function renderTeamAuth(){
       <label>Email</label><input id="t_email" type="email" inputmode="email" placeholder="ton@email.com">
       <label>Mot de passe (6 car. min)</label><input id="t_pass" type="password" placeholder="••••••••">
       <button class="btn primary" style="width:100%;margin-top:10px" onclick="teamSignup()">Créer mon compte</button>
-      <p class="note" style="margin-top:8px;font-size:11px">Le tout premier compte créé devient automatiquement le <b>patron</b> (aucun code requis).</p>
+      <p class="note" style="margin-top:8px;font-size:11px">${BACKEND==='supabase' ? "Le <b>code d'invitation</b> est obligatoire : c'est lui qui détermine ton rôle." : "Le tout premier compte créé devient automatiquement le <b>patron</b> (aucun code requis)."}</p>
     `}
       <div id="t_err" class="err"></div>
       <div class="sep"><span>ou</span></div>
@@ -2317,6 +2317,16 @@ function teamSignup(){
 /* Inscription en mode Supabase : le code d'invitation est obligatoire,
    et c'est le serveur qui decide du role. L'application ne peut pas se
    declarer patron toute seule. */
+function messageRejoindre(r){
+  return {
+    code_invalide:     "Code d'invitation invalide. Demande-le au patron.",
+    code_deja_utilise: "Ce code a déjà servi. Demande-en un nouveau au patron.",
+    code_expire:       "Ce code d'invitation a expiré.",
+    equipe_complete:   "L'équipe est complète (5 personnes maximum sur la formule Basique). Le patron peut passer en Premium.",
+    non_connecte:      "Tu n'es pas connecté. Reconnecte-toi puis réessaie."
+  }[r && r.erreur] || ("Impossible de rejoindre l'équipe : " + ((r&&r.erreur)||'erreur inconnue'));
+}
+
 function teamSignupSupabase(){
   const nom=val('t_nom'), email=val('t_email'), pass=val('t_pass');
   const invite=(val('t_invite')||'').toUpperCase();
@@ -2324,18 +2334,20 @@ function teamSignupSupabase(){
   if(!invite) return tErr("Entre le code d'invitation donné par le patron.");
   tErr('');
   AUTH.inscription(email, pass)
-    .then(function(){ return AUTH.rejoindre(invite, nom); })
+    .then(function(){ return BS._sb.demarrer().auth.getSession(); })
     .then(function(r){
-      if(r && r.ok){ toast("Bienvenue dans l'équipe ✅"); rechargerEquipe(); return; }
-      const msg = {
-        code_invalide:     "Code d'invitation invalide. Demande-le au patron.",
-        code_deja_utilise: "Ce code a déjà servi. Demande-en un nouveau au patron.",
-        code_expire:       "Ce code d'invitation a expiré.",
-        equipe_complete:   "L'équipe est complète (5 personnes maximum sur la formule Basique). Le patron peut passer en Premium.",
-        non_connecte:      "Connexion perdue, réessaie."
-      }[r && r.erreur] || ("Inscription impossible : " + ((r&&r.erreur)||'erreur inconnue'));
-      tErr(msg);
-      AUTH.deconnexion();
+      const session = r && r.data && r.data.session;
+      /* Si Supabase exige une confirmation par email, il n'ouvre pas de
+         session tout de suite. On ne peut donc pas encore créer la fiche :
+         on l'explique clairement au lieu d'échouer en silence. */
+      if(!session){
+        tErr("Compte créé ✅ Ouvre ta boîte mail et clique sur le lien de confirmation, puis reviens ici te connecter. Le code te sera redemandé.");
+        return null;
+      }
+      return AUTH.rejoindre(invite, nom).then(function(rep){
+        if(rep && rep.ok){ toast("Bienvenue dans l'équipe ✅"); rechargerEquipe(); return; }
+        tErr(messageRejoindre(rep));
+      });
     })
     .catch(function(e){ tErr(authMsg(e && e.code)); });
 }
@@ -2379,6 +2391,16 @@ function renderJoinTeam(){
 function joinTeam(){
   const inv=(val('j_invite')||'').toUpperCase(); const e=document.getElementById('j_err');
   if(!inv){ e.style.display='block'; e.textContent="Entre le code."; return; }
+  if(BACKEND==='supabase'){
+    e.style.display='none';
+    AUTH.rejoindre(inv, (AUTH_USER&&AUTH_USER.nom)||'').then(function(r){
+      if(r && r.ok){ toast("Bienvenue dans l'équipe ✅"); rechargerEquipe(); return; }
+      e.style.display='block'; e.textContent=messageRejoindre(r);
+    }).catch(function(err){
+      e.style.display='block'; e.textContent="Erreur : "+((err&&err.message)||'réessaie');
+    });
+    return;
+  }
   BS.lire('invites/'+inv).then(_v=>{ const s={val:()=>_v};
     const v=s.val(); if(!v){ e.style.display='block'; e.textContent="Code invalide."; return; }
     const invName=[v.prenom,v.nom].filter(Boolean).join(' ').trim();
