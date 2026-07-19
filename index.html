@@ -857,6 +857,68 @@ const BS = {
       if(r.error) console.warn('Enregistrement chantier :', r.error.message);
     },
 
+    /* --- MESSAGERIE INTERNE -----------------------------------------
+       Trois conversations : le groupe, les echanges a deux, et
+       l'assistant IA (prive a chaque personne). ------------------- */
+    versMessage(x){
+      const m = Object.assign({}, x.detail || {});
+      m.from = x.auteur_id || '';
+      m.nom  = x.nom || '';
+      m.txt  = x.texte || '';
+      m.ts   = x.cree_le ? new Date(x.cree_le).getTime() : Date.now();
+      return m;
+    },
+
+    async lireChat(){
+      const c = BS._sb.demarrer(); if(!c) return null;
+      const r = await c.from('messages_equipe').select('*');
+      if(r.error){ console.warn('Messagerie :', r.error.message); return null; }
+      const out = { group:{}, dm:{}, ai:{} };
+      (r.data||[]).forEach(function(x){
+        const m = BS._sb.versMessage(x);
+        if(x.canal === 'direct'){
+          const k = dmKey(x.auteur_id||'', x.destinataire_id||'');
+          if(!out.dm[k]) out.dm[k] = {};
+          out.dm[k][x.id] = m;
+        } else if(x.canal === 'ia'){
+          const u = x.auteur_id || '';
+          if(!out.ai[u]) out.ai[u] = {};
+          out.ai[u][x.id] = m;
+        } else {
+          out.group[x.id] = m;
+        }
+      });
+      return await BS._sb.FICHIERS.pourLApp(out);
+    },
+
+    async ecrireMessage(canal, id, msg, cle){
+      const c = BS._sb.demarrer(); if(!c) return;
+      if(!BS._sb.entrepriseId) return;
+      const propre = await BS._sb.FICHIERS.pourLaBase(msg || {}, 'messages');
+      const detail = {};
+      ['img','audio','doc','docNom','docPoids','deleted','deletedBy','edited'].forEach(function(k){
+        if(propre[k] !== undefined) detail[k] = propre[k];
+      });
+      let destinataire = null;
+      if(canal === 'direct' && cle){
+        const bouts = String(cle).split('__');
+        destinataire = bouts.find(function(b){ return b && b !== propre.from; }) || bouts[0] || null;
+      }
+      const ligne = {
+        id: id,
+        entreprise_id: BS._sb.entrepriseId,
+        canal: canal,
+        auteur_id: propre.from || null,
+        destinataire_id: destinataire,
+        nom: propre.nom || '',
+        texte: propre.txt || '',
+        detail: detail,
+        cree_le: new Date(propre.ts || Date.now()).toISOString()
+      };
+      const r = await c.from('messages_equipe').upsert(ligne, { onConflict:'id' });
+      if(r.error) console.warn('Enregistrement message :', r.error.message);
+    },
+
     /* --- PLANNING ---------------------------------------------------
        Une ligne de base = une case du tableau : une semaine, une
        personne, un jour. -------------------------------------------- */
@@ -984,6 +1046,7 @@ const BS = {
       if(chemin === 'chantiers'){ BS._sb.lireChantiers().then(function(v){ cb(v); }); return null; }
       if(chemin === 'planning'){ BS._sb.lirePlanning().then(function(v){ cb(v); }); return null; }
       if(chemin === 'notesfrais'){ BS._sb.lireNotesFrais().then(function(v){ cb(v); }); return null; }
+      if(chemin === 'chat'){ BS._sb.lireChat().then(function(v){ cb(v); }); return null; }
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       cb(null); return null;
     },
@@ -994,6 +1057,7 @@ const BS = {
       if(chemin === 'chantiers') return BS._sb.lireChantiers();
       if(chemin === 'planning') return BS._sb.lirePlanning();
       if(chemin === 'notesfrais') return BS._sb.lireNotesFrais();
+      if(chemin === 'chat') return BS._sb.lireChat();
       if(chemin.indexOf('invites/')===0) return Promise.resolve(null);  // gere par rejoindre_entreprise
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       return Promise.resolve(null);
@@ -1013,6 +1077,14 @@ const BS = {
                   if(r.error) console.warn('Enregistrement reglages :', r.error.message);
                 });
       }
+      /* chat/... : un message */
+      let mg = chemin.match(/^chat\/group\/([^/]+)$/);
+      if(mg) return BS._sb.ecrireMessage('groupe', mg[1], valeur, null);
+      let md = chemin.match(/^chat\/dm\/([^/]+)\/([^/]+)$/);
+      if(md) return BS._sb.ecrireMessage('direct', md[2], valeur, md[1]);
+      let ma = chemin.match(/^chat\/ai\/([^/]+)\/([^/]+)$/);
+      if(ma) return BS._sb.ecrireMessage('ia', ma[2], valeur, null);
+
       /* planning/<semaine> : une semaine entiere */
       let mp = chemin.match(/^planning\/(.+)$/);
       if(mp) return BS._sb.ecrireSemaine(mp[1], valeur);
@@ -1059,6 +1131,15 @@ const BS = {
       return Promise.resolve();
     },
     supprimer(chemin){
+      const mm = chemin.match(/^chat\/(?:group|dm\/[^/]+|ai\/[^/]+)\/([^/]+)$/);
+      if(mm){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return c.from('messages_equipe').delete().eq('id', mm[1]);
+      }
+      if(chemin === 'chat'){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return c.from('messages_equipe').delete().eq('entreprise_id', BS._sb.entrepriseId);
+      }
       if(chemin === 'planning' || chemin === 'notesfrais'){
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
         const table = (chemin === 'planning') ? 'planning' : 'notes_frais';
@@ -1611,6 +1692,10 @@ function rechargerEquipe(){
         NOTES_FRAIS = v || {}; lsSet('cache_notesfrais', NOTES_FRAIS);
         if(BOOTED) render();
       });
+      BS.ecouter('chat', function(v){
+        CHAT = v || {}; lsSet('cache_chat', CHAT);
+        if(BOOTED) render();
+      });
     }
     if(BOOTED) render();
   });
@@ -1741,7 +1826,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v220 · 19/07";
+const APP_VERSION="v221 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
