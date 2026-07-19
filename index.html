@@ -595,6 +595,7 @@ const BS = {
     return BS._sb.supprimer(chemin);
   },
 
+
   /* --- cote Supabase : branche bloc par bloc (phase 4) --- */
   _sb: {
     client: null,
@@ -641,13 +642,61 @@ const BS = {
       });
     },
 
+    /* --- traduction entre la fiche de la base et le membre d'equipe
+           tel que l'application le manipule --- */
+    versMembre(r){
+      if(!r) return null;
+      const m = { nom:r.nom||'', email:r.email||'', role:r.role||'employe',
+                  coutHoraire: Number(r.cout_horaire)||0,
+                  congesAnnuels: (r.conges_annuels==null?25:r.conges_annuels),
+                  docs: r.docs||{}, absences: r.absences||{}, seen: r.vu||{},
+                  createdAt: r.cree_le ? new Date(r.cree_le).getTime() : Date.now() };
+      if(r.prenom) m.prenom = r.prenom;
+      if(r.nom_famille) m.nomFamille = r.nom_famille;
+      if(r.avatar_url) m.photo = r.avatar_url;
+      return m;
+    },
+    versFiche(m){
+      const f = { nom:m.nom||'', email:m.email||'', role:m.role||'employe',
+                  cout_horaire: Number(m.coutHoraire)||0,
+                  conges_annuels: (m.congesAnnuels==null?25:m.congesAnnuels),
+                  docs: m.docs||{}, absences: m.absences||{}, vu: m.seen||{},
+                  prenom: m.prenom||null, nom_famille: m.nomFamille||null,
+                  avatar_url: m.photo||null };
+      return f;
+    },
+
+    /* Toute l'equipe. Les regles de la base ne renvoient que
+       les collegues de la meme entreprise — jamais ceux d'un autre client. */
+    lireEquipe(){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      return c.from('utilisateurs').select('*').then(function(r){
+        if(r.error){ console.warn('Equipe :', r.error.message); return null; }
+        const out = {};
+        (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versMembre(x); });
+        return out;
+      });
+    },
+    lireMembre(uid){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      return c.from('utilisateurs').select('*').eq('id', uid).maybeSingle().then(function(r){
+        if(r.error){ console.warn('Membre :', r.error.message); return null; }
+        return BS._sb.versMembre(r.data);
+      });
+    },
+
     ecouter(chemin, cb){
       if(chemin === 'config'){ BS._sb.lireReglages().then(function(v){ cb(v); }); return null; }
+      if(chemin === 'team'){ BS._sb.lireEquipe().then(function(v){ cb(v); }); return null; }
+      if(chemin.indexOf('team/')===0){ BS._sb.lireMembre(chemin.slice(5)).then(function(v){ cb(v); }); return null; }
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       cb(null); return null;
     },
     lire(chemin){
       if(chemin === 'config') return BS._sb.lireReglages();
+      if(chemin === 'team') return BS._sb.lireEquipe();
+      if(chemin.indexOf('team/')===0) return BS._sb.lireMembre(chemin.slice(5));
+      if(chemin.indexOf('invites/')===0) return Promise.resolve(null);  // gere par rejoindre_entreprise
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       return Promise.resolve(null);
     },
@@ -666,13 +715,117 @@ const BS = {
                   if(r.error) console.warn('Enregistrement reglages :', r.error.message);
                 });
       }
+      /* team/<uid>/seen/<type> : une case de notifications vues */
+      let m = chemin.match(/^team\/([^/]+)\/seen\/([^/]+)$/);
+      if(m){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return BS._sb.lireMembre(m[1]).then(function(mem){
+          const vu = (mem && mem.seen) || {}; vu[m[2]] = valeur;
+          return c.from('utilisateurs').update({ vu: vu }).eq('id', m[1]);
+        });
+      }
+      /* team/<uid> : une fiche complete */
+      m = chemin.match(/^team\/([^/]+)$/);
+      if(m){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        if(!valeur) return c.from('utilisateurs').delete().eq('id', m[1]);
+        return c.from('utilisateurs').update(BS._sb.versFiche(valeur)).eq('id', m[1])
+          .then(function(r){ if(r.error) console.warn('Enregistrement membre :', r.error.message); });
+      }
       console.warn('Supabase : ecriture « '+chemin+' » pas encore basculee');
       return Promise.resolve();
     },
     supprimer(chemin){
+      const m = chemin.match(/^team\/([^/]+)$/);
+      if(m){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        return c.from('utilisateurs').delete().eq('id', m[1]);
+      }
       console.warn('Supabase : suppression « '+chemin+' » pas encore basculee');
       return Promise.resolve();
     }
+  }
+};
+/* ==================================================================
+   COUCHE DE CONNEXION  —  meme principe que BS, pour l'identite
+   ------------------------------------------------------------------
+   L'application ne parle plus directement a firebase.auth().
+   Elle demande a AUTH : qui est connecte, connecte-moi, deconnecte-moi.
+   ================================================================== */
+const AUTH = {
+  _u: null,                      // la personne connectee, cote Supabase
+
+  /* Qui est connecte ? Renvoie {uid,email,nom} ou null. */
+  qui(){
+    if(BACKEND==='supabase') return AUTH._u;
+    try{
+      const u = firebase.auth().currentUser;
+      return u ? { uid:u.uid, email:u.email, nom:u.displayName||'' } : null;
+    }catch(_){ return null; }
+  },
+  connecte(){ return !!AUTH.qui(); },
+
+  /* Prevenu a chaque connexion / deconnexion. */
+  surveiller(cb){
+    if(BACKEND==='supabase'){
+      const c = BS._sb.demarrer(); if(!c) return;
+      const conv = u => u ? { uid:u.id, email:u.email, nom:(u.user_metadata&&u.user_metadata.nom)||'' } : null;
+      c.auth.getSession().then(function(r){
+        AUTH._u = conv(r && r.data && r.data.session ? r.data.session.user : null);
+        cb(AUTH._u);
+      });
+      c.auth.onAuthStateChange(function(ev, session){
+        AUTH._u = conv(session ? session.user : null);
+        cb(AUTH._u);
+      });
+      return;
+    }
+    firebase.auth().onAuthStateChanged(cb);
+  },
+
+  connexion(email, mdp){
+    if(BACKEND==='supabase'){
+      return BS._sb.demarrer().auth.signInWithPassword({ email:email, password:mdp })
+        .then(function(r){ if(r.error) throw { code:r.error.message }; return r.data.user; });
+    }
+    return firebase.auth().signInWithEmailAndPassword(email, mdp).then(c=>c.user);
+  },
+
+  inscription(email, mdp){
+    if(BACKEND==='supabase'){
+      return BS._sb.demarrer().auth.signUp({ email:email, password:mdp })
+        .then(function(r){ if(r.error) throw { code:r.error.message }; return r.data.user; });
+    }
+    return firebase.auth().createUserWithEmailAndPassword(email, mdp).then(c=>c.user);
+  },
+
+  motDePasseOublie(email){
+    if(BACKEND==='supabase'){
+      return BS._sb.demarrer().auth.resetPasswordForEmail(email)
+        .then(function(r){ if(r.error) throw { code:r.error.message }; });
+    }
+    return firebase.auth().sendPasswordResetEmail(email);
+  },
+
+  deconnexion(){
+    if(BACKEND==='supabase'){
+      AUTH._u = null;
+      const c = BS._sb.client; if(!c) return Promise.resolve();
+      return c.auth.signOut().catch(function(){});
+    }
+    try{ return firebase.auth().signOut(); }catch(_){ return Promise.resolve(); }
+  },
+
+  /* Rejoindre une entreprise avec un code d'invitation.
+     Cote Supabase, c'est le serveur qui cree la fiche : l'application
+     ne peut pas se declarer membre toute seule. */
+  rejoindre(code, nom){
+    if(BACKEND!=='supabase') return Promise.resolve({ ok:false, erreur:'hors_supabase' });
+    return BS._sb.demarrer().rpc('rejoindre_entreprise', { p_code:code, p_nom:nom||null })
+      .then(function(r){
+        if(r.error) return { ok:false, erreur:r.error.message };
+        return r.data || { ok:false, erreur:'reponse_vide' };
+      });
   }
 };
 
@@ -1064,10 +1217,43 @@ function bootSupabase(){
   BS.ecouter('config', function(v){
     if(v){ CONFIG_DB = v; lsSet('cache_config', CONFIG_DB); syncEtapes(); }
     try{ applyTheme(); applyAppIcons(); }catch(e){}
-    AUTH_READY = true; BOOTED = true; render();
+    AUTH_READY = true;
+    if(!BOOTED){ BOOTED = true; }
+    render();
   });
+
+  /* On suit la connexion. Les donnees internes ne sont chargees
+     QU'UNE FOIS connecte — comme avec Firebase. */
+  AUTH.surveiller(function(u){
+    AUTH_USER = u || null; AUTH_READY = true;
+    if(u){ rechargerEquipe(); }
+    else { ME = null; TEAM = {}; if(SCREEN==='team') SCREEN='entry'; }
+    if(!BOOTED){ BOOTED = true; }
+    render();
+  });
+
   /* filet de securite : si la base ne repond pas, on affiche quand meme */
   setTimeout(function(){ if(!BOOTED){ AUTH_READY=true; BOOTED=true; render(); } }, 6000);
+}
+
+/* Recharge l'equipe et mon propre profil depuis Supabase. */
+function rechargerEquipe(){
+  const u = AUTH.qui(); if(!u) return Promise.resolve();
+  return BS._sb.lireEquipe().then(function(t){
+    TEAM = t || {}; lsSet('cache_team', TEAM);
+    ME = TEAM[u.uid] || null; lsSet('cache_me', ME);
+    if(ME){
+      loadSeenFromProfile(ME);
+      /* les reglages prives ne sont lisibles qu'une fois connecte :
+         on les recharge maintenant */
+      BS.ecouter('config', function(v){
+        if(v){ CONFIG_DB = v; lsSet('cache_config', CONFIG_DB); syncEtapes(); }
+        if(BOOTED) render();
+      });
+      if(SCREEN==='entry'){ SCREEN='team'; TAB='chantiers'; CUR_CHANTIER=null; }
+    }
+    if(BOOTED) render();
+  });
 }
 
 function boot(){
@@ -1127,7 +1313,7 @@ function boot(){
 function saveChantier(id){ if(useFB) BS.ecrire('chantiers/'+id, CHANTIERS[id]); else lsSet('batisuivi_chantiers',CHANTIERS); }
 function saveConfigDB(){
   if(useFB){
-    if(!firebase.auth().currentUser){ toast("Connecte-toi au compte patron pour enregistrer la personnalisation en ligne."); return false; }
+    if(!AUTH.connecte()){ toast("Connecte-toi au compte patron pour enregistrer la personnalisation en ligne."); return false; }
     BS.ecrire('config', CONFIG_DB).catch(e=>{ toast("Enregistrement refusé : "+((e&&e.message)||"connecte-toi au compte patron.")); });
   } else { lsSet('batisuivi_config',CONFIG_DB); }
   try{ applyAppIcons(); }catch(e){}
@@ -1195,7 +1381,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v215 · 19/07";
+const APP_VERSION="v216 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
@@ -1213,7 +1399,7 @@ const DEV_EMAIL="massiliaconsulting1@gmail.com"; // accès dev réservé à CET 
 function devAllowed(user){ if(!user) return false; if(DEV_EMAIL) return (user.email||'').toLowerCase()===DEV_EMAIL.toLowerCase(); return true; }
 function devStart(){
   if(!useFB){ SCREEN='dev'; DEV_ACCESS=false; render(); toTop(); return; } // mode local de test
-  const u=firebase.auth().currentUser;
+  const u=AUTH.qui();
   if(u && devAllowed(u)){ devAfterLogin(u); return; }   // déjà connecté avec le bon compte
   openDevLogin();
 }
@@ -1231,11 +1417,11 @@ function devLoginPw(){
   const er=document.getElementById('dev_em_err');
   if(!em||!pw){ if(er){ er.style.display='block'; er.textContent="Entre l'email et le mot de passe."; } return; }
   if(er) er.style.display='none';
-  firebase.auth().signInWithEmailAndPassword(em,pw).then(c=>devAfterLogin(c.user)).catch(e=>{ if(er){ er.style.display='block'; er.textContent=authMsg(e.code); } });
+  AUTH.connexion(em,pw).then(u=>devAfterLogin(u)).catch(e=>{ if(er){ er.style.display='block'; er.textContent=authMsg(e.code); } });
 }
 function devAfterLogin(user){
   if(!user) return;
-  if(!devAllowed(user)){ try{ firebase.auth().signOut(); }catch(_){} const er=document.getElementById('dev_em_err'); if(er){ er.style.display='block'; er.textContent="Ce compte n'est pas autorisé pour l'espace dev."; } return; }
+  if(!devAllowed(user)){ try{ AUTH.deconnexion(); }catch(_){} const er=document.getElementById('dev_em_err'); if(er){ er.style.display='block'; er.textContent="Ce compte n'est pas autorisé pour l'espace dev."; } return; }
   closeModal(); SCREEN='dev'; DEV_ACCESS=false; CUR_CHANTIER=null; render(); toTop();
 }
 function contactInfo(){ const o=(CONFIG_DB&&CONFIG_DB.contact)||{}; return { tel:(o.tel||CONFIG.TELEPHONE||''), email:(o.email||CONFIG.EMAIL||''), adresse:(o.adresse||CONFIG.ADRESSE_ENTREPRISE||''), horaires:(o.horaires||CONFIG.HORAIRES||'') }; }
@@ -1366,7 +1552,7 @@ function renderDev(){
     <p class="note" style="text-align:center;margin-top:6px;font-size:11px">BatiSuivi · ${APP_VERSION} · espace privé</p>
   </div>`;
 }
-function devSignOut(){ closeModal(); ME=null; DEV_ACCESS=false; CUR_CHANTIER=null; TAB='chantiers'; SCREEN='entry'; if(useFB){ firebase.auth().signOut().catch(()=>{}); } AUTH_USER=null; render(); toTop(); toast("Déconnecté ✅"); }
+function devSignOut(){ closeModal(); ME=null; DEV_ACCESS=false; CUR_CHANTIER=null; TAB='chantiers'; SCREEN='entry'; if(useFB||BACKEND==='supabase'){ AUTH.deconnexion(); } AUTH_USER=null; render(); toTop(); toast("Déconnecté ✅"); }
 function devOpenAsBoss(){ ME={nom:'Accès dev',role:'boss',_dev:true}; if(!AUTH_USER) AUTH_USER={uid:'dev-admin'}; DEV_ACCESS=true; SCREEN='team'; TAB='chantiers'; CUR_CHANTIER=null; ARCH_VIEW=false; CLIENTS_VIEW=false; render(); toTop(); }
 function devSetPointage(v){ CONFIG_DB.pointage=v; saveConfigDB(); renderDev(); }
 function devSetFactu(v){ CONFIG_DB.factuOff=!v; saveConfigDB(); renderDev(); }
@@ -2090,9 +2276,10 @@ function teamLogin(){
   if(!useFB){ return localTeamDemo(); }
   const email=val('t_email'),pass=val('t_pass');
   if(!email||!pass) return tErr("Entre email et mot de passe.");
-  tErr(''); firebase.auth().signInWithEmailAndPassword(email,pass).catch(e=>tErr(authMsg(e.code)));
+  tErr(''); AUTH.connexion(email,pass).catch(e=>tErr(authMsg(e&&e.code)));
 }
 function teamSignup(){
+  if(BACKEND==='supabase'){ return teamSignupSupabase(); }
   if(!useFB){ return localTeamDemo(); }
   const nom=val('t_nom'),email=val('t_email'),pass=val('t_pass'),invite=(val('t_invite')||'').toUpperCase();
   if(!email||pass.length<6) return tErr("Email + mot de passe (6 car. min).");
@@ -2127,8 +2314,35 @@ function teamSignup(){
     }
     if(e&&e.code==='bad-invite') tErr("Code d'invitation invalide. Demande-le au patron (tu peux aussi entrer ton code sur l'écran suivant)."); else tErr(authMsg(e&&e.code)); });
 }
-function teamReset(){ const email=val('t_email'); if(!email) return tErr("Entre ton email puis re-clique."); firebase.auth().sendPasswordResetEmail(email).then(()=>{tErr('');toast("Email de réinitialisation envoyé 📧");}).catch(e=>tErr(authMsg(e.code))); }
+/* Inscription en mode Supabase : le code d'invitation est obligatoire,
+   et c'est le serveur qui decide du role. L'application ne peut pas se
+   declarer patron toute seule. */
+function teamSignupSupabase(){
+  const nom=val('t_nom'), email=val('t_email'), pass=val('t_pass');
+  const invite=(val('t_invite')||'').toUpperCase();
+  if(!email || pass.length<6) return tErr("Email + mot de passe (6 caractères minimum).");
+  if(!invite) return tErr("Entre le code d'invitation donné par le patron.");
+  tErr('');
+  AUTH.inscription(email, pass)
+    .then(function(){ return AUTH.rejoindre(invite, nom); })
+    .then(function(r){
+      if(r && r.ok){ toast("Bienvenue dans l'équipe ✅"); rechargerEquipe(); return; }
+      const msg = {
+        code_invalide:     "Code d'invitation invalide. Demande-le au patron.",
+        code_deja_utilise: "Ce code a déjà servi. Demande-en un nouveau au patron.",
+        code_expire:       "Ce code d'invitation a expiré.",
+        equipe_complete:   "L'équipe est complète (5 personnes maximum sur la formule Basique). Le patron peut passer en Premium.",
+        non_connecte:      "Connexion perdue, réessaie."
+      }[r && r.erreur] || ("Inscription impossible : " + ((r&&r.erreur)||'erreur inconnue'));
+      tErr(msg);
+      AUTH.deconnexion();
+    })
+    .catch(function(e){ tErr(authMsg(e && e.code)); });
+}
+
+function teamReset(){ const email=val('t_email'); if(!email) return tErr("Entre ton email puis re-clique."); AUTH.motDePasseOublie(email).then(()=>{tErr('');toast("Email de réinitialisation envoyé 📧");}).catch(e=>tErr(authMsg(e.code))); }
 function teamGoogle(){
+  if(BACKEND==='supabase'){ tErr("La connexion Google sera activée plus tard. Utilise ton email et ton mot de passe."); return; }
   if(!useFB){ return localTeamDemo(); }
   const p=new firebase.auth.GoogleAuthProvider();
   const mob=/iPhone|iPad|Android/i.test(navigator.userAgent||'');
@@ -2144,7 +2358,7 @@ function afterTeamAuth(user){
   });
 }
 function backToDev(){ ME=null; CLIENT=null; if(AUTH_USER&&AUTH_USER.uid==='dev-admin') AUTH_USER=null; DEV_ACCESS=false; CUR_CHANTIER=null; ARCH_VIEW=false; CLIENTS_VIEW=false; TAB='chantiers'; closeModal(); SCREEN='dev'; render(); toTop(); }
-function teamSignOut(){ if(EMP_PREVIEW){ exitEmployeePreview(); return; } if(DEV_ACCESS){ backToDev(); return; } if(!confirm("Te déconnecter ?")) return; closeModal(); CUR_CHANTIER=null; TAB='chantiers'; if(useFB) firebase.auth().signOut(); else { ME=null; SCREEN='entry'; render(); } toTop(); }
+function teamSignOut(){ if(EMP_PREVIEW){ exitEmployeePreview(); return; } if(DEV_ACCESS){ backToDev(); return; } if(!confirm("Te déconnecter ?")) return; closeModal(); CUR_CHANTIER=null; TAB='chantiers'; if(useFB||BACKEND==='supabase') AUTH.deconnexion(); else { ME=null; SCREEN='entry'; render(); } toTop(); }
 function val(id){ const e=document.getElementById(id); return e?e.value.trim():''; }
 
 // compte Google existant sans profil équipe -> saisir un code d'invitation
@@ -4476,7 +4690,7 @@ function aiAssistantSend(){
   if(AI_BUSY) return;
   const e=document.getElementById('chat_in'); const txt=e?e.value.trim():''; if(!txt) return;
   if(!iaOn()){ toast("L'assistant IA est désactivé."); return; }
-  if(useFB && !(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'assistant."); return; }
+  if(useFB && !(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'assistant."); return; }
   const me=myUid();
   saveAiMsg(uid(), {from:me, nom:(ME&&ME.nom)||'', txt, ts:Date.now()});
   if(e) e.value='';
@@ -4514,7 +4728,7 @@ function redacGen(){
   const e=document.getElementById('redac_ctx'); const ctx=e?e.value.trim():(REDAC.ctx||'').trim(); REDAC.ctx=ctx;
   if(!ctx){ toast("Décris d'abord le contexte."); return; }
   if(!iaOn()){ toast("L'assistant IA est désactivé."); return; }
-  if(useFB && !(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'assistant."); return; }
+  if(useFB && !(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'assistant."); return; }
   if(!useFB){ toast("La rédaction fonctionnera une fois l'app en ligne sur Firebase."); return; }
   const prompt=redacConsigne(REDAC.type)+" Contexte fourni par l'artisan : "+ctx;
   REDAC.busy=true; REDAC.err=''; REDAC.out=''; render();
@@ -4560,7 +4774,7 @@ function devisIAGenPhoto(){
   if(!DEVISIA.photo){ toast("Prends d'abord une photo."); return; }
   if(!iaOn()){ toast("Réservé à l'abonnement Premium."); return; }
   if(!useFB){ toast("Disponible une fois l'app en ligne."); return; }
-  if(!(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'IA."); return; }
+  if(!(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'IA."); return; }
   const e=document.getElementById('devisia_txt'); DEVISIA.txt=e?e.value.trim():(DEVISIA.txt||'');
   const m=String(DEVISIA.photo).match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
   if(!m){ toast("Format d'image non reconnu."); return; }
@@ -4591,7 +4805,7 @@ function devisIAGen(){
   const e=document.getElementById('devisia_txt'); const txt=e?e.value.trim():(DEVISIA.txt||'').trim(); DEVISIA.txt=txt;
   if(!txt){ toast("Décris d'abord les travaux."); return; }
   if(!iaOn()){ toast("L'assistant IA est désactivé."); return; }
-  if(useFB && !(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'assistant."); return; }
+  if(useFB && !(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'assistant."); return; }
   if(!useFB){ toast("Le devis assisté fonctionnera une fois l'app en ligne sur Firebase."); return; }
   const prompt=`Tu es un métreur du bâtiment en France. À partir de la description de travaux ci-dessous, propose des lignes de devis réalistes avec des prix HT en euros (marché français). Réponds UNIQUEMENT avec un tableau JSON valide, sans aucun texte autour ni explication, au format exact : [{"label":"désignation courte","qty":1,"unit":"u","pu":0}]. label = désignation, qty = quantité, unit = unité (u, m2, ml, h, forfait…), pu = prix unitaire HT en euros. Description des travaux : ${txt}`;
   DEVISIA.busy=true; DEVISIA.err=''; DEVISIA.lignes=null; render();
@@ -4945,7 +5159,7 @@ function genererResumeIA(){
   if(RESUME_BUSY) return;
   if(!isPremium()){ toast("Le résumé du jour est réservé à l'abonnement Premium."); return; }
   if(!useFB){ toast("Le résumé IA fonctionne une fois l'app en ligne."); return; }
-  if(!(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'IA."); return; }
+  if(!(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'IA."); return; }
   const ctx=resumeContexte();
   const prompt="Tu es l'assistant de gestion d'un artisan du bâtiment. Voici l'état de son entreprise ce matin :\n\n"+ctx+
     "\n\nÉcris-lui son résumé du jour : 4 à 6 phrases maximum, en français, en le tutoyant, ton direct, concret et bienveillant, comme un bras droit qui a tout vérifié pour lui. Commence par ce qui compte le plus. Cite des chiffres précis. Termine par UNE seule priorité claire pour aujourd'hui. Pas de titre, pas de liste à puces, pas de formule de politesse, pas d'emoji.";
@@ -6228,7 +6442,7 @@ async function fraisLireTicket(){
   const url=window._fraisPhoto;
   if(!url){ toast("Prends d'abord une photo du ticket."); return; }
   if(!useFB){ toast("Disponible une fois l'app en ligne."); return; }
-  if(!(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'IA."); return; }
+  if(!(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'IA."); return; }
   const btn=document.getElementById('fr_ia');
   if(btn){ btn.disabled=true; btn.innerHTML='✨ Lecture du ticket…'; }
   try{
@@ -7487,7 +7701,7 @@ async function lancerDiagnostic(){
   if(DIAG_BUSY) return;
   if(!isDevSpace()){ toast("Réservé à l'espace développeur."); return; }
   if(!useFB){ toast("Mode local : rien à diagnostiquer."); return; }
-  if(!(firebase.auth().currentUser)){ toast("Connecte-toi avec ton compte dev."); return; }
+  if(!(AUTH.connecte())){ toast("Connecte-toi avec ton compte dev."); return; }
   DIAG_BUSY=true; DIAG=null; renderDev();
   const res={ ts:Date.now(), fonctions:[], regles:null };
   try{
@@ -7910,7 +8124,7 @@ function chargerIaUsage(){
   if(IA_USAGE_BUSY) return;
   if(!isDevSpace()){ toast("Réservé à l'espace développeur."); return; }
   if(!useFB){ toast("Disponible une fois l'app en ligne."); return; }
-  if(!(firebase.auth().currentUser)){ toast("Connecte-toi avec ton compte dev."); return; }
+  if(!(AUTH.connecte())){ toast("Connecte-toi avec ton compte dev."); return; }
   IA_USAGE_BUSY=true; renderDev();
   const fn=firebase.app().functions('europe-west1').httpsCallable('iaUsage');
   fn({}).then(r=>{ IA_USAGE=(r&&r.data)||null; })
@@ -9429,7 +9643,7 @@ function crStructurer(id){
   crStopMic();
   const raw=document.getElementById('cr_raw'); const texte=raw?raw.value.trim():'';
   if(!texte){ toast("Dicte ou écris d'abord ton compte-rendu."); return; }
-  if(useFB && !(firebase.auth().currentUser)){ toast("Connecte-toi pour utiliser l'IA."); return; }
+  if(useFB && !(AUTH.connecte())){ toast("Connecte-toi pour utiliser l'IA."); return; }
   const btn=document.getElementById('cr_struct');
   if(btn){ btn.disabled=true; btn.textContent='⏳ Structuration en cours…'; }
   crFn()({ texte }).then(res=>{
@@ -9453,7 +9667,7 @@ function crSave(id){
   const get=elId=>{ const e=document.getElementById(elId); return e?e.value.trim():''; };
   const cr={
     ts: Date.now(),
-    by: (ME&&ME.nom)|| (useFB&&firebase.auth().currentUser?firebase.auth().currentUser.email:'') || '',
+    by: (ME&&ME.nom)|| ((AUTH.qui()||{}).email||'') || '',
     taches_realisees:get('cr_taches'), materiaux_manquants:get('cr_materiaux'),
     problemes:get('cr_problemes'), notes:get('cr_notes')
   };
