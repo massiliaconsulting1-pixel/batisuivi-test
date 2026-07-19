@@ -558,6 +558,13 @@ const SUPABASE_CONFIG = {
    batisuivi.fr/ec-maconnerie  ->  'ec-maconnerie'
    Si l'adresse ne dit rien, on prend la valeur ecrite ci-dessus. */
 function slugClient(){
+  /* 1. Pour tester : ?client=dupont-carrelage dans l'adresse.
+        Permet de basculer d'un artisan a l'autre sans toucher au fichier. */
+  try{
+    const q = new URLSearchParams(location.search).get('client');
+    if(q) return q.trim().toLowerCase();
+  }catch(_){ }
+  /* 2. Valeur ecrite en dur (mode test). */
   if(SUPABASE_CONFIG.slug) return SUPABASE_CONFIG.slug;
   try{
     var bouts = location.pathname.split('/').filter(Boolean);
@@ -1841,7 +1848,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v225 · 19/07";
+const APP_VERSION="v226 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
