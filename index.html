@@ -631,8 +631,31 @@ const BS = {
         });
     },
 
-    /* Les reglages = la vitrine (publique) + le coffre (si connecte). */
+    /* Les reglages.
+       REGLE : une fois connecte, l'entreprise est celle du COMPTE, jamais
+       celle ecrite dans l'adresse. L'adresse ne sert qu'avant connexion
+       (ecran d'accueil et espace client). Sans cette regle, ouvrir
+       l'adresse d'un confrere afficherait son enseigne au-dessus de ses
+       propres donnees : trompeur, meme si rien ne fuit. */
     lireReglages(){
+      if(BS._sb.entrepriseId){
+        const c = BS._sb.demarrer();
+        return c.from('entreprises')
+          .select('id,slug,nom,couleur,formule,branding,config')
+          .eq('id', BS._sb.entrepriseId).maybeSingle()
+          .then(function(r){
+            if(r.error || !r.data) return BS._sb.lireVitrineSeule();
+            BS._sb.entreprise = r.data;
+            const publics = Object.assign({}, r.data.branding || {});
+            if(!publics.nom)  publics.nom  = r.data.nom;
+            if(!publics.plan) publics.plan = r.data.formule;
+            return Object.assign({}, r.data.config || {}, publics);
+          });
+      }
+      return BS._sb.lireVitrineSeule();
+    },
+
+    lireVitrineSeule(){
       return BS._sb.chargerVitrine().then(function(v){
         if(!v) return null;
         const publics = Object.assign({}, v.branding || {});
@@ -1091,8 +1114,10 @@ const BS = {
         Object.keys(valeur || {}).forEach(function(k){
           (VITRINE.indexOf(k) >= 0 ? branding : config)[k] = valeur[k];
         });
-        return c.from('entreprises').update({ branding: branding, config: config })
-                .eq('slug', v.slug).then(function(r){
+        const cible = BS._sb.entrepriseId
+          ? c.from('entreprises').update({ branding: branding, config: config }).eq('id', BS._sb.entrepriseId)
+          : c.from('entreprises').update({ branding: branding, config: config }).eq('slug', v.slug);
+        return cible.then(function(r){
                   if(r.error) BS._sb.souci('Enregistrement des réglages', r.error);
                 });
       }
@@ -1848,7 +1873,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v226 · 19/07";
+const APP_VERSION="v227 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
