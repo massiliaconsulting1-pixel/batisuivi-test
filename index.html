@@ -803,7 +803,7 @@ const BS = {
       clientPrenom:'client_prenom', clientSociete:'client_societe',
       clientEmail:'client_email', clientTel:'client_tel',
       clientSiren:'client_siren', clientTvaIntra:'client_tva',
-      published:'publie', archived:'archive', rgpdAnonymise:'rgpd_anonymise'
+      archived:'archive', rgpdAnonymise:'rgpd_anonymise'
     },
     DATES_CH: ['date_debut','date_fin','date_rdv'],
 
@@ -818,7 +818,8 @@ const BS = {
         else if(NON_TEXTE.indexOf(col) < 0) c[k] = '';   // vide en base = vide dans l'app
       });
       c.heuresPrevues = Number(r.heures_prevues) || 0;
-      c.published = !!r.publie;
+      /* published = la LISTE des documents publies au client (devis,
+         factures, avoirs). Elle vit dans « reste », pas dans une colonne. */
       c.archived  = !!r.archive;
       c.createdAt = r.cree_le ? new Date(r.cree_le).getTime() : Date.now();
       return c;
@@ -839,7 +840,9 @@ const BS = {
           reste[k] = c[k];
         }
       });
-      ligne.publie = !!c.published;
+      /* la colonne « publie » sert seulement de repere : y a-t-il au moins
+         un document publie pour le client ? Elle n'est jamais relue. */
+      ligne.publie = !!(c.published && Object.keys(c.published).length);
       ligne.archive = !!c.archived;
       if(ligne.client_type === '') ligne.client_type = null;
       ligne.reste = reste;
@@ -1838,7 +1841,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v222 · 19/07";
+const APP_VERSION="v223 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
