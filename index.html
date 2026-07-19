@@ -744,6 +744,103 @@ const BS = {
       });
     },
 
+    /* --- PLANNING ---------------------------------------------------
+       Une ligne de base = une case du tableau : une semaine, une
+       personne, un jour. -------------------------------------------- */
+    lirePlanning(){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      return c.from('planning').select('*').then(function(r){
+        if(r.error){ console.warn('Planning :', r.error.message); return null; }
+        const out = {};
+        (r.data||[]).forEach(function(x){
+          if(!x.semaine || x.jour === null || !x.utilisateur_id) return;
+          const sem = String(x.semaine).slice(0,10);
+          if(!out[sem]) out[sem] = {};
+          if(!out[sem][x.utilisateur_id]) out[sem][x.utilisateur_id] = {};
+          out[sem][x.utilisateur_id][x.jour] = x.detail || {};
+        });
+        return out;
+      });
+    },
+
+    /* Enregistre une semaine entiere : on efface la semaine puis on
+       repose les cases. Simple, et jamais de doublon. */
+    ecrireSemaine(sem, semaine){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+      if(!BS._sb.entrepriseId) return Promise.resolve();
+      return c.from('planning').delete().eq('entreprise_id', BS._sb.entrepriseId).eq('semaine', sem)
+        .then(function(){
+          const lignes = [];
+          Object.keys(semaine || {}).forEach(function(u){
+            const jours = semaine[u] || {};
+            Object.keys(jours).forEach(function(j){
+              const cell = jours[j] || {};
+              lignes.push({
+                entreprise_id: BS._sb.entrepriseId,
+                utilisateur_id: u,
+                semaine: sem,
+                jour: parseInt(j, 10),
+                /* on ne relie au chantier que s'il existe encore,
+                   sinon la base refuserait la ligne */
+                chantier_id: (cell.chId && CHANTIERS[cell.chId]) ? cell.chId : null,
+                titre: cell.chantier || null,
+                type: cell.repos ? 'absence' : 'chantier',
+                detail: cell
+              });
+            });
+          });
+          if(!lignes.length) return;
+          return c.from('planning').insert(lignes).then(function(r){
+            if(r.error) console.warn('Enregistrement planning :', r.error.message);
+          });
+        });
+    },
+
+    /* --- NOTES DE FRAIS --------------------------------------------- */
+    lireNotesFrais(){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      return c.from('notes_frais').select('*').then(function(r){
+        if(r.error){ console.warn('Notes de frais :', r.error.message); return null; }
+        const out = {};
+        (r.data||[]).forEach(function(x){
+          const u = x.utilisateur_id || 'inconnu';
+          if(!out[u]) out[u] = {};
+          out[u][x.id] = {
+            url: x.ticket_url || '',
+            desc: x.libelle || '',
+            montant: Number(x.montant) || 0,
+            nom: x.nom || '',
+            ts: x.cree_le ? new Date(x.cree_le).getTime() : Date.now()
+          };
+        });
+        return out;
+      });
+    },
+
+    ecrireNotesFrais(uid, liste){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+      if(!BS._sb.entrepriseId) return Promise.resolve();
+      return c.from('notes_frais').delete().eq('utilisateur_id', uid).then(function(){
+        const lignes = Object.keys(liste || {}).map(function(k){
+          const n = liste[k] || {};
+          return {
+            id: k,
+            entreprise_id: BS._sb.entrepriseId,
+            utilisateur_id: uid,
+            montant: Number(n.montant) || 0,
+            libelle: n.desc || '',
+            ticket_url: n.url || null,
+            nom: n.nom || '',
+            cree_le: new Date(n.ts || Date.now()).toISOString()
+          };
+        });
+        if(!lignes.length) return;
+        return c.from('notes_frais').insert(lignes).then(function(r){
+          if(r.error) console.warn('Enregistrement note de frais :', r.error.message);
+        });
+      });
+    },
+
     /* Toute l'equipe. Les regles de la base ne renvoient que
        les collegues de la meme entreprise — jamais ceux d'un autre client. */
     lireEquipe(){
@@ -772,6 +869,8 @@ const BS = {
       if(chemin === 'team'){ BS._sb.lireEquipe().then(function(v){ cb(v); }); return null; }
       if(chemin.indexOf('team/')===0){ BS._sb.lireMembre(chemin.slice(5)).then(function(v){ cb(v); }); return null; }
       if(chemin === 'chantiers'){ BS._sb.lireChantiers().then(function(v){ cb(v); }); return null; }
+      if(chemin === 'planning'){ BS._sb.lirePlanning().then(function(v){ cb(v); }); return null; }
+      if(chemin === 'notesfrais'){ BS._sb.lireNotesFrais().then(function(v){ cb(v); }); return null; }
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       cb(null); return null;
     },
@@ -780,6 +879,8 @@ const BS = {
       if(chemin === 'team') return BS._sb.lireEquipe();
       if(chemin.indexOf('team/')===0) return BS._sb.lireMembre(chemin.slice(5));
       if(chemin === 'chantiers') return BS._sb.lireChantiers();
+      if(chemin === 'planning') return BS._sb.lirePlanning();
+      if(chemin === 'notesfrais') return BS._sb.lireNotesFrais();
       if(chemin.indexOf('invites/')===0) return Promise.resolve(null);  // gere par rejoindre_entreprise
       console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
       return Promise.resolve(null);
@@ -799,6 +900,22 @@ const BS = {
                   if(r.error) console.warn('Enregistrement reglages :', r.error.message);
                 });
       }
+      /* planning/<semaine> : une semaine entiere */
+      let mp = chemin.match(/^planning\/(.+)$/);
+      if(mp) return BS._sb.ecrireSemaine(mp[1], valeur);
+      if(chemin === 'planning'){
+        const sems = Object.keys(valeur||{});
+        return Promise.all(sems.map(function(w){ return BS._sb.ecrireSemaine(w, valeur[w]); }));
+      }
+
+      /* notesfrais/<personne> : sa liste complete */
+      let mf = chemin.match(/^notesfrais\/([^/]+)$/);
+      if(mf) return BS._sb.ecrireNotesFrais(mf[1], valeur);
+      if(chemin === 'notesfrais'){
+        const gens = Object.keys(valeur||{});
+        return Promise.all(gens.map(function(u){ return BS._sb.ecrireNotesFrais(u, valeur[u]); }));
+      }
+
       /* chantiers/<id> : une fiche de chantier */
       let mc = chemin.match(/^chantiers\/([^/]+)$/);
       if(mc) return BS._sb.ecrireChantier(mc[1], valeur);
@@ -829,6 +946,11 @@ const BS = {
       return Promise.resolve();
     },
     supprimer(chemin){
+      if(chemin === 'planning' || chemin === 'notesfrais'){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        const table = (chemin === 'planning') ? 'planning' : 'notes_frais';
+        return c.from(table).delete().eq('entreprise_id', BS._sb.entrepriseId);
+      }
       const mc = chemin.match(/^chantiers\/([^/]+)$/);
       if(mc){
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
@@ -1368,6 +1490,14 @@ function rechargerEquipe(){
         CHANTIERS = v || {}; lsSet('cache_chantiers', CHANTIERS);
         if(BOOTED) render();
       });
+      BS.ecouter('planning', function(v){
+        PLANNING = v || {}; lsSet('cache_planning', PLANNING);
+        if(BOOTED) render();
+      });
+      BS.ecouter('notesfrais', function(v){
+        NOTES_FRAIS = v || {}; lsSet('cache_notesfrais', NOTES_FRAIS);
+        if(BOOTED) render();
+      });
     }
     if(BOOTED) render();
   });
@@ -1498,7 +1628,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v218 · 19/07";
+const APP_VERSION="v219 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
