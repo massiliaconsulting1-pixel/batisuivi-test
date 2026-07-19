@@ -1841,7 +1841,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v224 · 19/07";
+const APP_VERSION="v225 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
@@ -2593,6 +2593,41 @@ function renderClient(){
 /* ====== Accès client sécurisé via la Cloud Function accesClient (v54) ======
    Le client n'a pas de compte : il ne lit/écrit plus la base en direct.
    Tout passe par le serveur, qui vérifie le code et ne renvoie que SON chantier. */
+/* ==================================================================
+   LES FONCTIONS SERVEUR
+   Cote Firebase : une fonction par nom, comme avant.
+   Cote Supabase : une seule porte « ia », a qui on dit quoi faire.
+   ================================================================== */
+const ACTIONS_IA = {
+  structurerCompteRendu: 'compteRendu',
+  assistantBatiSuivi:    'assistant',
+  devisPhoto:            'devisPhoto',
+  lireTicket:            'lireTicket',
+  projectionIA:          'projection',
+  iaUsage:               'usage'
+};
+function fnServeur(nom){
+  if(BACKEND==='supabase'){
+    const action = ACTIONS_IA[nom];
+    return function(donnees){
+      if(!action) return Promise.reject(new Error("Cette fonction n'est pas encore disponible."));
+      const c = BS._sb.demarrer();
+      if(!c) return Promise.reject(new Error("Service indisponible."));
+      return c.functions.invoke('ia', { body: Object.assign({action:action}, donnees||{}) })
+        .then(async function(r){
+          if(r.error){
+            let m = "Service indisponible.";
+            try{ const j = await r.error.context.json(); if(j && j.erreur) m = j.erreur; }catch(_){ }
+            throw new Error(m);
+          }
+          if(r.data && r.data.erreur) throw new Error(r.data.erreur);
+          return { data: r.data };
+        });
+    };
+  }
+  return firebase.app().functions('europe-west1').httpsCallable(nom);
+}
+
 function clientApiCall(action, payload){
   if(BACKEND==='supabase'){
     const c = BS._sb.demarrer();
@@ -3924,7 +3959,7 @@ function projGenerate(id){
   const res=document.getElementById('proj_result_'+id);
   if(res) res.innerHTML='<p class="note" style="margin:0">⏳ Génération du rendu… (quelques secondes, ne ferme pas la page)</p>';
   const pa=imgs.a.split(',').pop(), pi=imgs.i?imgs.i.split(',').pop():null;
-  const fn=firebase.app().functions('europe-west1').httpsCallable('projectionIA');
+  const fn=fnServeur('projectionIA');
   fn({photoActuelle:pa, photoInspiration:pi, texte:txt}).then(r=>{
     const out=r.data&&r.data.image;
     if(!out){ if(res) res.innerHTML='<p class="note" style="margin:0;color:var(--danger)">❌ Aucun rendu reçu. Réessaie.</p>'; return; }
@@ -5097,7 +5132,7 @@ function chatThreadView(){
 /* ----- Assistant IA (chat) ----- */
 let AI_BUSY=false;
 function aiText(s){ s=esc(s||''); s=s.replace(/\*\*([^*]+)\*\*/g,'<b>$1</b>'); s=s.replace(/__([^_]+)__/g,'<b>$1</b>'); s=s.replace(/^\s{0,3}#{1,6}\s*(.+)$/gm,'<b>$1</b>'); s=s.replace(/^\s*[-*\u2022]\s+/gm,'\u2022 '); s=s.replace(/`([^`]+)`/g,'$1'); s=s.replace(/\*/g,''); s=s.replace(/\n/g,'<br>'); return s; }
-function aiFn(){ return firebase.app().functions('europe-west1').httpsCallable('assistantBatiSuivi'); }
+function aiFn(){ return fnServeur('assistantBatiSuivi'); }
 function saveAiMsg(id,msg){ const me=myUid(); if(!CHAT.ai)CHAT.ai={}; if(!CHAT.ai[me])CHAT.ai[me]={}; CHAT.ai[me][id]=msg; if(useFB) BS.ecrire('chat/ai/'+me+'/'+id, msg); else lsSet('batisuivi_chat',CHAT); }
 /* ============ Contexte envoyé à l'assistant IA ============ */
 function assistantContexte(){
@@ -5277,7 +5312,7 @@ function devisIAGenPhoto(){
   const m=String(DEVISIA.photo).match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
   if(!m){ toast("Format d'image non reconnu."); return; }
   DEVISIA.busy=true; DEVISIA.err=''; DEVISIA.lignes=null; render();
-  const fn=firebase.app().functions('europe-west1').httpsCallable('devisPhoto');
+  const fn=fnServeur('devisPhoto');
   fn({ image:m[2], media:m[1], texte:DEVISIA.txt, mode:DEVISIA.mode })
     .then(res=>{
       const reply=(res&&res.data&&(res.data.reply||res.data.text))||'';
@@ -6946,7 +6981,7 @@ async function fraisLireTicket(){
   try{
     const m=String(url).match(/^data:(image\/[a-zA-Z]+);base64,(.+)$/);
     if(!m) throw new Error("format d'image non reconnu");
-    const fn=firebase.app().functions('europe-west1').httpsCallable('lireTicket');
+    const fn=fnServeur('lireTicket');
     const r=await fn({ image:m[2], media:m[1] });
     const d=(r&&r.data)||{};
     let n=0;
@@ -8144,7 +8179,7 @@ function diagCode(e){
 async function diagPingFonction(f){
   const t0=Date.now();
   try{
-    const fn=firebase.app().functions('europe-west1').httpsCallable(f.k);
+    const fn=fnServeur(f.k);
     await fn(f.p);
     return {k:f.k, l:f.l, lvl:'ok', ms:Date.now()-t0, msg:"répond correctement"};
   }catch(e){
@@ -8624,7 +8659,7 @@ function chargerIaUsage(){
   if(!useFB){ toast("Disponible une fois l'app en ligne."); return; }
   if(!(AUTH.connecte())){ toast("Connecte-toi avec ton compte dev."); return; }
   IA_USAGE_BUSY=true; renderDev();
-  const fn=firebase.app().functions('europe-west1').httpsCallable('iaUsage');
+  const fn=fnServeur('iaUsage');
   fn({}).then(r=>{ IA_USAGE=(r&&r.data)||null; })
     .catch(e=>{ toast("Lecture impossible : "+((e&&e.message)||'erreur')); })
     .finally(()=>{ IA_USAGE_BUSY=false; renderDev(); });
@@ -10072,7 +10107,7 @@ function openDocWindow(doc){
 /* ===== Compte-rendu vocal (dictée + structuration IA) ===== */
 var CR_STATE = { id:null, rec:null, listening:false, finalText:'' };
 
-function crFn(){ return firebase.app().functions('europe-west1').httpsCallable('structurerCompteRendu'); }
+function crFn(){ return fnServeur('structurerCompteRendu'); }
 
 function openCRVocal(id){
   const c=CHANTIERS[id]; if(!c) return;
