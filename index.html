@@ -22,6 +22,7 @@
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-auth-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-functions-compat.js"></script>
 <script src="https://www.gstatic.com/firebasejs/10.12.0/firebase-app-check-compat.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
 <script>
 /* ====================================================================
@@ -546,8 +547,26 @@ const useFB = !!(FIREBASE_CONFIG.apiKey && FIREBASE_CONFIG.databaseURL);
    Tant que BACKEND vaut 'firebase', le comportement est identique
    a la v213, au caractere pres.
    ================================================================== */
-const BACKEND = 'firebase';            // 'firebase' | 'supabase'
-const SUPABASE_CONFIG = { url:'', anonKey:'', slug:'' };
+const BACKEND = 'supabase';            // 'firebase' | 'supabase'
+const SUPABASE_CONFIG = {
+  url:     'https://hqbrocwvfcfwairtawfa.supabase.co',
+  cle:     'sb_publishable_kpLDUAXAQgqcYS1ZO6HeJg_LM6ju7sk',
+  slug:    'ec-maconnerie'   // valeur de TEST. En production : laisser '' (deduit de l'adresse)
+};
+
+/* Quel artisan ? On le lit dans l'adresse de la page.
+   batisuivi.fr/ec-maconnerie  ->  'ec-maconnerie'
+   Si l'adresse ne dit rien, on prend la valeur ecrite ci-dessus. */
+function slugClient(){
+  if(SUPABASE_CONFIG.slug) return SUPABASE_CONFIG.slug;
+  try{
+    var bouts = location.pathname.split('/').filter(Boolean);
+    var dernier = bouts[bouts.length-1] || '';
+    if(dernier && !/\.[a-z]+$/i.test(dernier)) return dernier;
+    if(bouts.length>1) return bouts[bouts.length-2];
+  }catch(_){ }
+  return '';
+}
 
 const BS = {
   pret(){ return BACKEND==='firebase' ? useFB : !!(SUPABASE_CONFIG.url && SUPABASE_CONFIG.anonKey); },
@@ -576,12 +595,84 @@ const BS = {
     return BS._sb.supprimer(chemin);
   },
 
-  /* --- cote Supabase : branche en phase 4, bloc par bloc --- */
+  /* --- cote Supabase : branche bloc par bloc (phase 4) --- */
   _sb: {
-    ecouter(){ console.warn('Supabase : ecoute pas encore branchee'); return null; },
-    lire(){ return Promise.resolve(null); },
-    ecrire(){ return Promise.resolve(); },
-    supprimer(){ return Promise.resolve(); }
+    client: null,
+    entreprise: null,          // la fiche de l'artisan, une fois chargee
+
+    /* Ouvre la connexion a Supabase. Appele une seule fois au demarrage. */
+    demarrer(){
+      if(BS._sb.client) return BS._sb.client;
+      if(!window.supabase){ console.warn('Bibliotheque Supabase absente'); return null; }
+      BS._sb.client = window.supabase.createClient(SUPABASE_CONFIG.url, SUPABASE_CONFIG.cle);
+      return BS._sb.client;
+    },
+
+    /* Charge la vitrine publique de l'artisan : nom, logo, couleurs.
+       Lisible SANS etre connecte — c'est ce qui peint l'ecran d'accueil. */
+    chargerVitrine(){
+      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
+      const slug = slugClient();
+      if(!slug){ console.warn('Aucun artisan identifie dans l adresse'); return Promise.resolve(null); }
+      return c.from('vitrine').select('slug,nom,couleur,formule,branding').eq('slug', slug).maybeSingle()
+        .then(function(r){
+          if(r.error){ console.warn('Vitrine :', r.error.message); return null; }
+          BS._sb.entreprise = r.data || null;
+          return r.data;
+        });
+    },
+
+    /* Les reglages = la vitrine (publique) + le coffre (si connecte). */
+    lireReglages(){
+      return BS._sb.chargerVitrine().then(function(v){
+        if(!v) return null;
+        const publics = Object.assign({}, v.branding || {});
+        if(!publics.nom) publics.nom = v.nom;
+        if(!publics.plan) publics.plan = v.formule;
+        const c = BS._sb.client;
+        return c.auth.getSession().then(function(sess){
+          if(!sess || !sess.data || !sess.data.session) return publics;   // pas connecte : vitrine seule
+          return c.from('entreprises').select('config').eq('slug', v.slug).maybeSingle()
+            .then(function(r){
+              if(r.error || !r.data) return publics;
+              return Object.assign({}, r.data.config || {}, publics);
+            });
+        });
+      });
+    },
+
+    ecouter(chemin, cb){
+      if(chemin === 'config'){ BS._sb.lireReglages().then(function(v){ cb(v); }); return null; }
+      console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
+      cb(null); return null;
+    },
+    lire(chemin){
+      if(chemin === 'config') return BS._sb.lireReglages();
+      console.warn('Supabase : « '+chemin+' » pas encore bascule (phase 4 en cours)');
+      return Promise.resolve(null);
+    },
+    ecrire(chemin, valeur){
+      if(chemin === 'config'){
+        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
+        const v = BS._sb.entreprise; if(!v) return Promise.resolve();
+        /* On range chaque reglage du bon cote : vitrine ou coffre. */
+        const VITRINE = ['nom','slogan','logo','appIcon','couleurDefaut','couleursActives','favColors','plan'];
+        const branding = {}, config = {};
+        Object.keys(valeur || {}).forEach(function(k){
+          (VITRINE.indexOf(k) >= 0 ? branding : config)[k] = valeur[k];
+        });
+        return c.from('entreprises').update({ branding: branding, config: config })
+                .eq('slug', v.slug).then(function(r){
+                  if(r.error) console.warn('Enregistrement reglages :', r.error.message);
+                });
+      }
+      console.warn('Supabase : ecriture « '+chemin+' » pas encore basculee');
+      return Promise.resolve();
+    },
+    supprimer(chemin){
+      console.warn('Supabase : suppression « '+chemin+' » pas encore basculee');
+      return Promise.resolve();
+    }
   }
 };
 
@@ -959,9 +1050,30 @@ function saveRoles(){ saveConfigDB(); }
 /* ============== BOOT ============== */
 function cleanupSW(){ try{ if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(function(rs){ rs.forEach(function(r){ r.unregister(); }); }).catch(function(){}); } if(window.caches){ caches.keys().then(function(ks){ ks.forEach(function(k){ caches.delete(k); }); }).catch(function(){}); } }catch(_){ } }
 function resetCache(){ if(!confirm("Vider le cache de l'app et recharger la derniere version ?")) return; try{ if('serviceWorker' in navigator){ navigator.serviceWorker.getRegistrations().then(function(rs){ rs.forEach(function(r){ r.unregister(); }); }); } if(window.caches){ caches.keys().then(function(ks){ ks.forEach(function(k){ caches.delete(k); }); }); } }catch(_){ } setTimeout(function(){ location.reload(); }, 500); }
+/* ------------------------------------------------------------------
+   DEMARRAGE EN MODE SUPABASE
+   Etape 1 de la phase 4 : on charge la vitrine de l'artisan et on
+   affiche l'ecran d'accueil. La connexion et les donnees internes
+   arrivent aux etapes suivantes.
+   ------------------------------------------------------------------ */
+function bootSupabase(){
+  CONFIG_DB = lsGet('cache_config',{}) || {};
+  NOTES_SEEN=lsGet('notes_seen',{})||{}; VEH_SEEN=lsGet('veh_seen',{})||{};
+  MSG_SEEN=lsGet('msg_seen',{})||{}; ETAPE_SEEN=lsGet('etape_seen',{})||{}; SIGN_SEEN=lsGet('sign_seen',{})||{};
+  syncEtapes();
+  BS.ecouter('config', function(v){
+    if(v){ CONFIG_DB = v; lsSet('cache_config', CONFIG_DB); syncEtapes(); }
+    try{ applyTheme(); applyAppIcons(); }catch(e){}
+    AUTH_READY = true; BOOTED = true; render();
+  });
+  /* filet de securite : si la base ne repond pas, on affiche quand meme */
+  setTimeout(function(){ if(!BOOTED){ AUTH_READY=true; BOOTED=true; render(); } }, 6000);
+}
+
 function boot(){
   applyTheme();
   cleanupSW();
+  if(BACKEND==='supabase'){ bootSupabase(); return; }
   if(useFB){
     firebase.initializeApp(FIREBASE_CONFIG);
     // App Check (reCAPTCHA v3) : atteste que les requêtes viennent bien de l'app.
@@ -1083,7 +1195,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v214 · 19/07";
+const APP_VERSION="v215 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
