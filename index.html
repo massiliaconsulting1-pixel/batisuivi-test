@@ -667,6 +667,15 @@ const BS = {
       return f;
     },
 
+    /* Une erreur de base ne doit JAMAIS passer inapercue.
+       Avant, elle partait dans la console du navigateur : invisible.
+       Maintenant elle s'affiche, et on sait tout de suite quoi corriger. */
+    souci(quoi, erreur){
+      const detail = (erreur && (erreur.message || erreur.hint || erreur.details)) || erreur || '';
+      console.warn('[Supabase] ' + quoi, erreur);
+      try{ toast("⚠️ " + quoi + (detail ? " — " + detail : "")); }catch(_){ }
+    },
+
     /* --- LES FICHIERS ----------------------------------------------
        Aujourd'hui les photos sont ecrites EN TEXTE dans la base : une
        seule photo pese plusieurs centaines de milliers de caracteres.
@@ -702,7 +711,7 @@ const BS = {
           const r = await c.storage.from('fichiers').upload(chemin, blob, {
             contentType: blob.type || 'application/octet-stream', upsert: false
           });
-          if(r.error){ console.warn('Dépôt fichier :', r.error.message); return dataUrl; }
+          if(r.error){ BS._sb.souci('Dépôt du fichier', r.error); return dataUrl; }
           return BS._sb.FICHIERS.PREFIXE + chemin;
         }catch(e){ console.warn('Dépôt fichier :', e); return dataUrl; }
       },
@@ -768,7 +777,7 @@ const BS = {
         const table = {};
         try{
           const r = await c.storage.from('fichiers').createSignedUrls(uniques, 86400);
-          if(r.error){ console.warn('Lecture fichiers :', r.error.message); return objet; }
+          if(r.error){ BS._sb.souci('Lecture des fichiers', r.error); return objet; }
           (r.data||[]).forEach(function(x){
             if(x && x.signedUrl && !x.error){
               table[x.path] = x.signedUrl;
@@ -840,7 +849,7 @@ const BS = {
     async lireChantiers(){
       const c = BS._sb.demarrer(); if(!c) return null;
       const r = await c.from('chantiers').select('*');
-      if(r.error){ console.warn('Chantiers :', r.error.message); return null; }
+      if(r.error){ BS._sb.souci('Lecture des chantiers', r.error); return null; }
       const out = {};
       (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versChantier(x); });
       return await BS._sb.FICHIERS.pourLApp(out);
@@ -854,7 +863,7 @@ const BS = {
       const propre = await BS._sb.FICHIERS.pourLaBase(valeur, id);
       const ligne = BS._sb.versLigne(propre); ligne.id = id;
       const r = await c.from('chantiers').upsert(ligne, { onConflict:'id' });
-      if(r.error) console.warn('Enregistrement chantier :', r.error.message);
+      if(r.error) BS._sb.souci('Enregistrement du chantier', r.error);
     },
 
     /* --- MESSAGERIE INTERNE -----------------------------------------
@@ -872,7 +881,7 @@ const BS = {
     async lireChat(){
       const c = BS._sb.demarrer(); if(!c) return null;
       const r = await c.from('messages_equipe').select('*');
-      if(r.error){ console.warn('Messagerie :', r.error.message); return null; }
+      if(r.error){ BS._sb.souci('Lecture de la messagerie', r.error); return null; }
       const out = { group:{}, dm:{}, ai:{} };
       (r.data||[]).forEach(function(x){
         const m = BS._sb.versMessage(x);
@@ -916,7 +925,7 @@ const BS = {
         cree_le: new Date(propre.ts || Date.now()).toISOString()
       };
       const r = await c.from('messages_equipe').upsert(ligne, { onConflict:'id' });
-      if(r.error) console.warn('Enregistrement message :', r.error.message);
+      if(r.error) BS._sb.souci('Enregistrement du message', r.error);
     },
 
     /* --- PLANNING ---------------------------------------------------
@@ -925,7 +934,7 @@ const BS = {
     lirePlanning(){
       const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
       return c.from('planning').select('*').then(function(r){
-        if(r.error){ console.warn('Planning :', r.error.message); return null; }
+        if(r.error){ BS._sb.souci('Lecture du planning', r.error); return null; }
         const out = {};
         (r.data||[]).forEach(function(x){
           if(!x.semaine || x.jour === null || !x.utilisateur_id) return;
@@ -966,7 +975,7 @@ const BS = {
           });
           if(!lignes.length) return;
           return c.from('planning').insert(lignes).then(function(r){
-            if(r.error) console.warn('Enregistrement planning :', r.error.message);
+            if(r.error) BS._sb.souci('Enregistrement du planning', r.error);
           });
         });
     },
@@ -975,7 +984,7 @@ const BS = {
     lireNotesFrais(){
       const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
       return c.from('notes_frais').select('*').then(function(r){
-        if(r.error){ console.warn('Notes de frais :', r.error.message); return null; }
+        if(r.error){ BS._sb.souci('Lecture des notes de frais', r.error); return null; }
         const out = {};
         (r.data||[]).forEach(function(x){
           const u = x.utilisateur_id || 'inconnu';
@@ -1011,7 +1020,7 @@ const BS = {
         });
         if(!lignes.length) return;
         return c.from('notes_frais').insert(lignes).then(function(r){
-          if(r.error) console.warn('Enregistrement note de frais :', r.error.message);
+          if(r.error) BS._sb.souci('Enregistrement de la note de frais', r.error);
         });
       });
     },
@@ -1021,7 +1030,7 @@ const BS = {
     lireEquipe(){
       const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
       return c.from('utilisateurs').select('*').then(function(r){
-        if(r.error){ console.warn('Equipe :', r.error.message); return null; }
+        if(r.error){ BS._sb.souci('Lecture de l\u2019équipe', r.error); return null; }
         const out = {};
         const moi = AUTH.qui();
         (r.data||[]).forEach(function(x){
@@ -1034,7 +1043,7 @@ const BS = {
     lireMembre(uid){
       const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
       return c.from('utilisateurs').select('*').eq('id', uid).maybeSingle().then(function(r){
-        if(r.error){ console.warn('Membre :', r.error.message); return null; }
+        if(r.error){ BS._sb.souci('Lecture du profil', r.error); return null; }
         return BS._sb.versMembre(r.data);
       });
     },
@@ -1074,7 +1083,7 @@ const BS = {
         });
         return c.from('entreprises').update({ branding: branding, config: config })
                 .eq('slug', v.slug).then(function(r){
-                  if(r.error) console.warn('Enregistrement reglages :', r.error.message);
+                  if(r.error) BS._sb.souci('Enregistrement des réglages', r.error);
                 });
       }
       /* chat/... : un message */
@@ -1125,17 +1134,26 @@ const BS = {
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
         if(!valeur) return c.from('utilisateurs').delete().eq('id', m[1]);
         return c.from('utilisateurs').update(BS._sb.versFiche(valeur)).eq('id', m[1])
-          .then(function(r){ if(r.error) console.warn('Enregistrement membre :', r.error.message); });
+          .then(function(r){ if(r.error) BS._sb.souci('Enregistrement du membre', r.error); });
       }
       console.warn('Supabase : ecriture « '+chemin+' » pas encore basculee');
       return Promise.resolve();
     },
+    /* Efface et VERIFIE que quelque chose a bien ete efface.
+       Une suppression qui ne touche aucune ligne ne renvoie pas
+       d'erreur : elle ne fait rien, en silence. On le detecte. */
+    async effacer(table, colonne, valeur, quoi){
+      const c = BS._sb.demarrer(); if(!c) return;
+      const r = await c.from(table).delete().eq(colonne, valeur).select('id');
+      if(r.error){ BS._sb.souci('Suppression : ' + quoi, r.error); return; }
+      if(!r.data || !r.data.length){
+        BS._sb.souci('Rien n\u2019a été supprimé (' + quoi + ')', 'la ligne est introuvable ou refusée');
+      }
+    },
+
     supprimer(chemin){
       const mm = chemin.match(/^chat\/(?:group|dm\/[^/]+|ai\/[^/]+)\/([^/]+)$/);
-      if(mm){
-        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
-        return c.from('messages_equipe').delete().eq('id', mm[1]);
-      }
+      if(mm) return BS._sb.effacer('messages_equipe', 'id', mm[1], 'message');
       if(chemin === 'chat'){
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
         return c.from('messages_equipe').delete().eq('entreprise_id', BS._sb.entrepriseId);
@@ -1146,19 +1164,13 @@ const BS = {
         return c.from(table).delete().eq('entreprise_id', BS._sb.entrepriseId);
       }
       const mc = chemin.match(/^chantiers\/([^/]+)$/);
-      if(mc){
-        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
-        return c.from('chantiers').delete().eq('id', mc[1]);
-      }
+      if(mc) return BS._sb.effacer('chantiers', 'id', mc[1], 'chantier');
       if(chemin === 'chantiers'){
         const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
         return c.from('chantiers').delete().eq('entreprise_id', BS._sb.entrepriseId);
       }
       const m = chemin.match(/^team\/([^/]+)$/);
-      if(m){
-        const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
-        return c.from('utilisateurs').delete().eq('id', m[1]);
-      }
+      if(m) return BS._sb.effacer('utilisateurs', 'id', m[1], 'membre d\u2019équipe');
       console.warn('Supabase : suppression « '+chemin+' » pas encore basculee');
       return Promise.resolve();
     }
@@ -1826,7 +1838,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v221 · 19/07";
+const APP_VERSION="v222 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
