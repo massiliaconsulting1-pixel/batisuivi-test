@@ -667,6 +667,119 @@ const BS = {
       return f;
     },
 
+    /* --- LES FICHIERS ----------------------------------------------
+       Aujourd'hui les photos sont ecrites EN TEXTE dans la base : une
+       seule photo pese plusieurs centaines de milliers de caracteres.
+       On les sort dans l'espace de stockage.
+
+       Le principe : on ne touche a aucun ecran de l'application. On
+       intercepte au passage. A l'enregistrement, toute photo trouvee
+       est deposee dans le stockage et remplacee par son adresse. A la
+       lecture, l'adresse est retransformee en lien affichable, valable
+       24 heures.
+
+       Comme c'est fait au passage et non ecran par ecran, ca couvre
+       d'un coup les photos de chantier, les plans, les documents, le
+       journal, les tickets de frais et les rendus IA. ------------- */
+    FICHIERS: {
+      liens: new Map(),        // lien affichable -> adresse de rangement
+      PREFIXE: 'rangement:',
+
+      extension(mime){
+        const M = { 'image/jpeg':'jpg', 'image/png':'png', 'image/webp':'webp',
+                    'image/gif':'gif', 'application/pdf':'pdf' };
+        return M[mime] || 'bin';
+      },
+
+      async deposer(dataUrl, dossier){
+        const c = BS._sb.demarrer();
+        if(!c || !BS._sb.entrepriseId) return dataUrl;
+        try{
+          const rep  = await fetch(dataUrl);
+          const blob = await rep.blob();
+          const nom  = uid() + '.' + BS._sb.FICHIERS.extension(blob.type);
+          const chemin = BS._sb.entrepriseId + '/' + (dossier || 'divers') + '/' + nom;
+          const r = await c.storage.from('fichiers').upload(chemin, blob, {
+            contentType: blob.type || 'application/octet-stream', upsert: false
+          });
+          if(r.error){ console.warn('Dépôt fichier :', r.error.message); return dataUrl; }
+          return BS._sb.FICHIERS.PREFIXE + chemin;
+        }catch(e){ console.warn('Dépôt fichier :', e); return dataUrl; }
+      },
+
+      /* Avant d'ecrire : on depose les nouvelles photos, et on remet
+         les adresses de rangement a la place des liens temporaires. */
+      async pourLaBase(v, dossier){
+        const F = BS._sb.FICHIERS;
+        if(typeof v === 'string'){
+          if(v.slice(0,5) === 'data:') return await F.deposer(v, dossier);
+          const origine = F.liens.get(v);
+          return origine || v;
+        }
+        if(Array.isArray(v)){
+          const out = [];
+          for(const x of v) out.push(await F.pourLaBase(x, dossier));
+          return out;
+        }
+        if(v && typeof v === 'object'){
+          const out = {};
+          for(const k of Object.keys(v)) out[k] = await F.pourLaBase(v[k], dossier);
+          return out;
+        }
+        return v;
+      },
+
+      recenser(v, liste){
+        const F = BS._sb.FICHIERS;
+        if(typeof v === 'string'){
+          if(v.indexOf(F.PREFIXE) === 0) liste.push(v.slice(F.PREFIXE.length));
+          return;
+        }
+        if(Array.isArray(v)){ v.forEach(function(x){ F.recenser(x, liste); }); return; }
+        if(v && typeof v === 'object'){ Object.keys(v).forEach(function(k){ F.recenser(v[k], liste); }); }
+      },
+
+      substituer(v, table){
+        const F = BS._sb.FICHIERS;
+        if(typeof v === 'string'){
+          if(v.indexOf(F.PREFIXE) === 0){
+            const lien = table[v.slice(F.PREFIXE.length)];
+            return lien || v;
+          }
+          return v;
+        }
+        if(Array.isArray(v)) return v.map(function(x){ return F.substituer(x, table); });
+        if(v && typeof v === 'object'){
+          const out = {};
+          Object.keys(v).forEach(function(k){ out[k] = F.substituer(v[k], table); });
+          return out;
+        }
+        return v;
+      },
+
+      /* Apres avoir lu : on transforme les adresses en liens affichables. */
+      async pourLApp(objet){
+        const F = BS._sb.FICHIERS;
+        const c = BS._sb.demarrer(); if(!c) return objet;
+        const chemins = [];
+        F.recenser(objet, chemins);
+        if(!chemins.length) return objet;
+        const uniques = Array.from(new Set(chemins));
+        const table = {};
+        try{
+          const r = await c.storage.from('fichiers').createSignedUrls(uniques, 86400);
+          if(r.error){ console.warn('Lecture fichiers :', r.error.message); return objet; }
+          (r.data||[]).forEach(function(x){
+            if(x && x.signedUrl && !x.error){
+              table[x.path] = x.signedUrl;
+              F.liens.set(x.signedUrl, F.PREFIXE + x.path);
+            }
+          });
+        }catch(e){ console.warn('Lecture fichiers :', e); return objet; }
+        return F.substituer(objet, table);
+      }
+    },
+
     /* --- CHANTIERS -------------------------------------------------
        Les champs principaux vont dans leurs colonnes.
        Tout le reste (photos, pointages, devis...) patiente dans « reste »
@@ -724,24 +837,24 @@ const BS = {
       return ligne;
     },
 
-    lireChantiers(){
-      const c = BS._sb.demarrer(); if(!c) return Promise.resolve(null);
-      return c.from('chantiers').select('*').then(function(r){
-        if(r.error){ console.warn('Chantiers :', r.error.message); return null; }
-        const out = {};
-        (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versChantier(x); });
-        return out;
-      });
+    async lireChantiers(){
+      const c = BS._sb.demarrer(); if(!c) return null;
+      const r = await c.from('chantiers').select('*');
+      if(r.error){ console.warn('Chantiers :', r.error.message); return null; }
+      const out = {};
+      (r.data||[]).forEach(function(x){ out[x.id] = BS._sb.versChantier(x); });
+      return await BS._sb.FICHIERS.pourLApp(out);
     },
 
-    ecrireChantier(id, valeur){
-      const c = BS._sb.demarrer(); if(!c) return Promise.resolve();
-      if(!valeur) return c.from('chantiers').delete().eq('id', id);
-      if(!BS._sb.entrepriseId){ console.warn('Chantier : entreprise inconnue'); return Promise.resolve(); }
-      const ligne = BS._sb.versLigne(valeur); ligne.id = id;
-      return c.from('chantiers').upsert(ligne, { onConflict:'id' }).then(function(r){
-        if(r.error) console.warn('Enregistrement chantier :', r.error.message);
-      });
+    async ecrireChantier(id, valeur){
+      const c = BS._sb.demarrer(); if(!c) return;
+      if(!valeur){ await c.from('chantiers').delete().eq('id', id); return; }
+      if(!BS._sb.entrepriseId){ console.warn('Chantier : entreprise inconnue'); return; }
+      /* les photos partent d'abord dans le stockage */
+      const propre = await BS._sb.FICHIERS.pourLaBase(valeur, id);
+      const ligne = BS._sb.versLigne(propre); ligne.id = id;
+      const r = await c.from('chantiers').upsert(ligne, { onConflict:'id' });
+      if(r.error) console.warn('Enregistrement chantier :', r.error.message);
     },
 
     /* --- PLANNING ---------------------------------------------------
@@ -1628,7 +1741,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v219 · 19/07";
+const APP_VERSION="v220 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
