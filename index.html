@@ -1841,7 +1841,7 @@ function backToEntry(){ DEV_ACCESS=false; SCREEN='entry'; render(); toTop(); }
 
 /* ====================== ESPACE DÉVELOPPEUR (privé) ====================== */
 const DEV_CODE="23112003";
-const APP_VERSION="v223 · 19/07";
+const APP_VERSION="v224 · 19/07";
 function askDevCode(){
   openModal(`<div class="grabber"></div><h2 style="margin-bottom:8px"><svg class="lic" viewBox="0 0 24 24" width="1.05em" height="1.05em" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M14.7 6.3a4 4 0 0 0-5.4 5.4L3 18v3h3l6.3-6.3a4 4 0 0 0 5.4-5.4l-2.7 2.7-2-2 2.7-2.7Z"/></svg> Espace développeur</h2>
     <p class="note">Réservé à l'installateur de l'application.</p>
@@ -2594,11 +2594,27 @@ function renderClient(){
    Le client n'a pas de compte : il ne lit/écrit plus la base en direct.
    Tout passe par le serveur, qui vérifie le code et ne renvoie que SON chantier. */
 function clientApiCall(action, payload){
+  if(BACKEND==='supabase'){
+    const c = BS._sb.demarrer();
+    if(!c) return Promise.reject(new Error("Service indisponible."));
+    return c.functions.invoke('acces-client', {
+      body: Object.assign({action:action}, payload||{})
+    }).then(async function(r){
+      if(r.error){
+        /* le serveur explique toujours pourquoi il refuse : on le relaie */
+        let msg = "Service indisponible.";
+        try{ const j = await r.error.context.json(); if(j && j.erreur) msg = j.erreur; }catch(_){ }
+        throw new Error(msg);
+      }
+      if(r.data && r.data.erreur) throw new Error(r.data.erreur);
+      return r.data;
+    });
+  }
   if(!useFB) return Promise.reject(new Error("Indisponible hors-ligne."));
   const fn = firebase.app().functions('europe-west1').httpsCallable('accesClient');
   return fn(Object.assign({action:action}, payload||{})).then(r=>r.data);
 }
-function isRealClient(){ return !!(useFB && CLIENT && !BOSS_PREVIEW && !DEV_ACCESS); }
+function isRealClient(){ return !!((useFB||BACKEND==='supabase') && CLIENT && !BOSS_PREVIEW && !DEV_ACCESS); }
 function clientPersist(action, payload){
   // Vrai client -> écriture ciblée via le serveur. Aperçu patron/dev ou mode local -> écriture directe.
   if(isRealClient()){
